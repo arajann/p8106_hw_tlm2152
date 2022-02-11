@@ -13,6 +13,8 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(glmnet)
 library(caret)
+library(pls)
+library(corrplot)
 
 house_trn <- read_csv(file = "./Homework 1/housing_training.csv") %>% 
   janitor::clean_names() %>% 
@@ -25,7 +27,9 @@ house_tst <- read_csv(file = "./Homework 1/housing_test.csv") %>%
 
 In this analysis, we will predict the price of a house based on its characteristics. To begin, I have loaded in a training data set, `house_trn`, that consists of `r nrow(house_trn)` training observations and a test data set, `house_tst`, that contains `r nrow(house_tst)` test observations. Each data set includes `r ncol(house_tst)` variables: `sale_price` along with `r ncol(house_tst) - 1` predictors.
 
-(a) First, we will use the training data set to fit a linear model using least squares. We will use a cross-validation technique on the training data.
+### Part A
+
+First, we will use the training data set to fit a linear model using least squares. We will use a cross-validation technique on the training data.
 
 ```{r training least squares, warning = FALSE}
 set.seed(100)
@@ -43,7 +47,24 @@ lm_fit <- train(sale_price ~ .,
 mean(lm_fit$resample$RMSE) # cross-validation RMSE
 ```
 
-(b) Next, we will fit a lasso model on the training data.
+This model is easy to fit and to interpret, but there are some issues that can arise when using least-squares linear regression. It is possible that some predictor terms truly share non-linear relationships with the response variable. For example in this exercise, square footage in a house might increase price dramatically from 1,500 to 2,000 $ft^2$, but the effect may be less pronounced when increasing from 3,000 to 3,500. Another issue that can arise in least-squares is that some predictors may be collinear, or have high correlation, with each other. We can check this with the correlation plot below.
+
+```{r predictor correlations}
+# creating model matrix of predictors
+house_trn_pred <- model.matrix(sale_price ~ ., house_trn)[,-1]
+
+corrplot(cor(house_trn_pred),
+         method = "circle",
+         type = "full",
+         tl.cex = 0.5,
+         order = "hclust")
+```
+
+As we can see in the correlation plot, some variables like `kitchen_qual` and `exter_qual` or `first_flr_sf` and `total_bsmt_sf` seem to have high correlation to each other. It is difficult to separate the individual effects of these collinear variables. To get around this issue, we could drop one of the collinear variables or combine the two into one new predictor.
+
+### Part B
+
+Next, we will fit a lasso model on the training data.
 
 ```{r training lasso caret}
 set.seed(100)
@@ -53,8 +74,6 @@ ctrl2 <- trainControl(method = "repeatedcv",
                       number = 10,
                       selectionFunction = "oneSE")
 
-# creating model matrix of predictors
-house_trn_pred <- model.matrix(sale_price ~ ., house_trn)[,-1]
 # creating vector of response variable
 house_trn_price <- house_trn$sale_price
 
@@ -76,14 +95,14 @@ lasso_fit$bestTune # 1se lambda value
 house_tst_mat <- model.matrix(sale_price ~ ., house_tst)[,-1]
 
 # creating predictions using lasso model
-tst_predict <- predict(lasso_fit, newdata = house_tst_mat)
+lasso_tst_predict <- predict(lasso_fit, newdata = house_tst_mat)
 
-#calculating RMSE
-postResample(pred = tst_predict, obs = house_tst$sale_price) %>% 
+# calculating test RMSE
+postResample(pred = lasso_tst_predict, obs = house_tst$sale_price) %>% 
   knitr::kable()
 ```
 
-The RMSE noted above is around 20,500 with a tuning parameter (lambda) value of `r lasso_fit$bestTune`. Below are the coefficients in the model with this tuning parameter.
+The test RMSE noted above is around 20,500 with a tuning parameter (lambda) value of 336. Below are the 37 coefficients in the model with this tuning parameter.
 
 ```{r lasso 1se coef caret}
 coef(lasso_fit$finalModel, lasso_fit$finalModel$lambdaOpt)
@@ -123,9 +142,11 @@ The test RMSE for the lasso model is approximately `r format(sqrt(test_perf$mse)
 predict(cv_lasso, s = "lambda.1se", type = "coefficients")
 ```
 
-There are 31 coefficients and the intercept in the lasso model when the "1se" rule is used. This lambda value can be seen in the plot above, shown by the right-most dashed line.
+There are 26 coefficients and the intercept in the lasso model when the "1se" rule is used. This lambda value can be seen in the plot above, shown by the right-most dashed line.
 
-(c) Now, we will fit an elastic net model on the training data set.
+### Part C
+
+Now, we will fit an elastic net model on the training data set.
 
 ```{r training elastic net}
 set.seed(100)
@@ -143,10 +164,61 @@ myPar <- list(superpose.symbol = list(col = myCol),
               superpose.line = list(col = myCol))
 
 plot(enet_fit, par.settings = myPar)
+
+# coefficients of the elastic net model
+coef(enet_fit$finalModel, enet_fit$finalModel$lambdaOpt)
 ```
 
-The selected tuning parameters can be seen in the table below, corresponding to the minimum value in the plot above.
+The selected tuning parameters and test RMSE can be seen in the tables below, corresponding to the minimum value in the plot above.
 
-```{r elastic net param table, echo = FALSE}
+```{r elastic net error and param, echo = FALSE}
 knitr::kable(enet_fit$bestTune)
+
+# creating predictions using enet model
+enet_tst_predict <- predict(enet_fit, newdata = house_tst_mat)
+
+# calculating test RMSE
+postResample(pred = enet_tst_predict, obs = house_tst$sale_price) %>% 
+  knitr::kable()
 ```
+
+### Part D
+
+Next, we will fit a partial least squares model on the training data.
+
+```{r partial least squares training}
+set.seed(100)
+pls_fit <- train(x = house_trn_pred,
+                 y = house_trn_price,
+                 method = "pls",
+                 tuneGrid = data.frame(ncomp = 1:19),
+                 trControl = ctrl1,
+                 preProcess = c("center", "scale"))
+
+ggplot(pls_fit, highlight = TRUE)
+```
+
+Based on the plot above, the model with the minimum RMSE has 12 components.
+
+```{r partial least squares error}
+# creating predictions using the pls model
+pls_tst_predict <- predict(pls_fit, newdata = house_tst_mat)
+
+#calculating RMSE
+postResample(pred = pls_tst_predict, obs = house_tst$sale_price) %>% 
+  knitr::kable()
+```
+
+### Part E
+
+We can assess the various models using the `resamples` function. This function analyzes a set of resampling results from the various models on a common data set. Although we found the test error in the preceding sections, it is typically best practice to train models on training data only and compare performance based on cross-validation RMSE rather than test RMSE. This being the case, and our goal being prediction, we will want to choose the model with the lowest mean RMSE from the following output.
+
+```{r model comparison}
+resamp <- resamples(list(linear = lm_fit,
+                         lasso = lasso_fit,
+                         enet = enet_fit,
+                         pls = pls_fit))
+summary(resamp)
+```
+
+The elastic net and partial least squares models have very similar RMSE values. If `enet_fit` contained fewer coefficients, we may want to select this model based on the principle of parsimony. However, as can be seen in section (c), the `enet_fit` model maintains all of the possible predictors. For this reason, I would choose the `pls_fit` model fot predicting the response because it has the lowest mean RMSE.
