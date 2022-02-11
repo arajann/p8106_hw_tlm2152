@@ -1,0 +1,152 @@
+---
+title: "P8106 - HW1"
+author: "Tucker Morgan, tlm2152"
+date: "2/10/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries and data import, message = FALSE}
+library(tidyverse)
+library(glmnet)
+library(caret)
+
+house_trn <- read_csv(file = "./Homework 1/housing_training.csv") %>% 
+  janitor::clean_names() %>% 
+  na.omit()
+
+house_tst <- read_csv(file = "./Homework 1/housing_test.csv") %>% 
+  janitor::clean_names() %>% 
+  na.omit()
+```
+
+In this analysis, we will predict the price of a house based on its characteristics. To begin, I have loaded in a training data set, `house_trn`, that consists of `r nrow(house_trn)` training observations and a test data set, `house_tst`, that contains `r nrow(house_tst)` test observations. Each data set includes `r ncol(house_tst)` variables: `sale_price` along with `r ncol(house_tst) - 1` predictors.
+
+(a) First, we will use the training data set to fit a linear model using least squares. We will use a cross-validation technique on the training data.
+
+```{r training least squares, warning = FALSE}
+set.seed(100)
+# setting up ten-fold CV, repeated five times
+ctrl1 <- trainControl(method = "repeatedcv",
+                      repeats = 5,
+                      number = 10)
+
+lm_fit <- train(sale_price ~ .,
+                data = house_trn,
+                method = "lm",
+                trControl = ctrl1,
+                preProcess = "scale")
+
+mean(lm_fit$resample$RMSE) # cross-validation RMSE
+```
+
+(b) Next, we will fit a lasso model on the training data.
+
+```{r training lasso caret}
+set.seed(100)
+# creating another control for the 1se rule lasso
+ctrl2 <- trainControl(method = "repeatedcv",
+                      repeats = 5,
+                      number = 10,
+                      selectionFunction = "oneSE")
+
+# creating model matrix of predictors
+house_trn_pred <- model.matrix(sale_price ~ ., house_trn)[,-1]
+# creating vector of response variable
+house_trn_price <- house_trn$sale_price
+
+lasso_fit <- train(x = house_trn_pred,
+                   y = house_trn_price,
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha = 1,
+                                          lambda = exp(seq(8, -1, length = 100))),
+                   trControl = ctrl2,
+                   preProcess = c("center", "scale"))
+
+plot(lasso_fit, xTrans = log)
+
+lasso_fit$bestTune # 1se lambda value
+```
+
+```{r lasso test error caret}
+# creating model matrix of predictors
+house_tst_mat <- model.matrix(sale_price ~ ., house_tst)[,-1]
+
+# creating predictions using lasso model
+tst_predict <- predict(lasso_fit, newdata = house_tst_mat)
+
+#calculating RMSE
+postResample(pred = tst_predict, obs = house_tst$sale_price) %>% 
+  knitr::kable()
+```
+
+The RMSE noted above is around 20,500 with a tuning parameter (lambda) value of `r lasso_fit$bestTune`. Below are the coefficients in the model with this tuning parameter.
+
+```{r lasso 1se coef caret}
+coef(lasso_fit$finalModel, lasso_fit$finalModel$lambdaOpt)
+```
+
+Below is a similar process using `glmnet` instead of `caret`.
+
+```{r training lasso glmnet}
+# creating model matrix of predictors for glmnet
+house_trn_pred <- model.matrix(sale_price ~ ., house_trn)[,-1]
+# creating vector of response variable
+house_trn_price <- house_trn$sale_price
+
+cv_lasso <- cv.glmnet(x = house_trn_pred,
+                      y = house_trn_price,
+                      alpha = 1,
+                      lambda = exp(seq(8, -1, length = 100)))
+plot(cv_lasso)
+cv_lasso$lambda.1se
+```
+
+```{r lasso test error glmnet}
+# creating model matrix of test predictors
+house_tst_pred <- model.matrix(sale_price ~ ., house_tst)[,-1]
+# creating a vector of test set observations
+house_tst_price <- house_tst$sale_price
+
+test_perf <- assess.glmnet(cv_lasso,
+                           newx = house_tst_pred,
+                           newy = house_tst_price,
+                           s = "lambda.1se")
+```
+
+The test RMSE for the lasso model is approximately `r format(sqrt(test_perf$mse), digits = 4, scientific = TRUE)` with the "1se" lambda value of `r round(cv_lasso$lambda.1se, digits = 2)`.
+
+```{r lasso 1se coefficients}
+predict(cv_lasso, s = "lambda.1se", type = "coefficients")
+```
+
+There are 31 coefficients and the intercept in the lasso model when the "1se" rule is used. This lambda value can be seen in the plot above, shown by the right-most dashed line.
+
+(c) Now, we will fit an elastic net model on the training data set.
+
+```{r training elastic net}
+set.seed(100)
+enet_fit <- train(x = house_trn_pred,
+                  y = house_trn_price,
+                  method = "glmnet",
+                  tuneGrid = expand.grid(alpha = seq(0, 1, length = 21),
+                                         lambda = exp(seq(7, -2, length = 50))),
+                  trControl = ctrl1)
+```
+
+```{r plotting tuning parameters, fig.height = 6}
+myCol <- rainbow(25)
+myPar <- list(superpose.symbol = list(col = myCol),
+              superpose.line = list(col = myCol))
+
+plot(enet_fit, par.settings = myPar)
+```
+
+The selected tuning parameters can be seen in the table below, corresponding to the minimum value in the plot above.
+
+```{r elastic net param table, echo = FALSE}
+knitr::kable(enet_fit$bestTune)
+```
