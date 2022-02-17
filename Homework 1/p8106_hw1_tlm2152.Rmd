@@ -64,7 +64,7 @@ As we can see in the correlation plot, some variables like `kitchen_qual` and `e
 
 ### Part B
 
-Next, we will fit a lasso model on the training data.
+Next, we will fit a lasso model on the training data using the "1 standard error" rule for finding $\lambda$.
 
 ```{r training lasso caret}
 set.seed(100)
@@ -102,47 +102,11 @@ postResample(pred = lasso_tst_predict, obs = house_tst$sale_price) %>%
   knitr::kable()
 ```
 
-The test RMSE noted above is around 20,500 with a tuning parameter (lambda) value of 336. Below are the 37 coefficients in the model with this tuning parameter.
+The test RMSE noted above is around 20,500 with a tuning parameter ($\lambda$) value of 336. Below are the 37 coefficients in the model with this tuning parameter - using the 1 standard error rule.
 
 ```{r lasso 1se coef caret}
 coef(lasso_fit$finalModel, lasso_fit$finalModel$lambdaOpt)
 ```
-
-Below is a similar process using `glmnet` instead of `caret`.
-
-```{r training lasso glmnet}
-# creating model matrix of predictors for glmnet
-house_trn_pred <- model.matrix(sale_price ~ ., house_trn)[,-1]
-# creating vector of response variable
-house_trn_price <- house_trn$sale_price
-
-cv_lasso <- cv.glmnet(x = house_trn_pred,
-                      y = house_trn_price,
-                      alpha = 1,
-                      lambda = exp(seq(8, -1, length = 100)))
-plot(cv_lasso)
-cv_lasso$lambda.1se
-```
-
-```{r lasso test error glmnet}
-# creating model matrix of test predictors
-house_tst_pred <- model.matrix(sale_price ~ ., house_tst)[,-1]
-# creating a vector of test set observations
-house_tst_price <- house_tst$sale_price
-
-test_perf <- assess.glmnet(cv_lasso,
-                           newx = house_tst_pred,
-                           newy = house_tst_price,
-                           s = "lambda.1se")
-```
-
-The test RMSE for the lasso model is approximately `r format(sqrt(test_perf$mse), digits = 4, scientific = TRUE)` with the "1se" lambda value of `r round(cv_lasso$lambda.1se, digits = 2)`.
-
-```{r lasso 1se coefficients}
-predict(cv_lasso, s = "lambda.1se", type = "coefficients")
-```
-
-There are 26 coefficients and the intercept in the lasso model when the "1se" rule is used. This lambda value can be seen in the plot above, shown by the right-most dashed line.
 
 ### Part C
 
@@ -221,4 +185,4 @@ resamp <- resamples(list(linear = lm_fit,
 summary(resamp)
 ```
 
-The elastic net and partial least squares models have very similar RMSE values. If `enet_fit` contained fewer coefficients, we may want to select this model based on the principle of parsimony. However, as can be seen in section (c), the `enet_fit` model maintains all of the possible predictors. For this reason, I would choose the `pls_fit` model fot predicting the response because it has the lowest mean RMSE.
+The elastic net and partial least squares models have very similar RMSE values. If `enet_fit` contained fewer coefficients, we may want to select this model based on the principle of parsimony. However, as can be seen in section (c), the `enet_fit` model maintains all of the possible predictors. For this reason, I would choose the `pls_fit` model for predicting the response because it has the lowest mean RMSE.
