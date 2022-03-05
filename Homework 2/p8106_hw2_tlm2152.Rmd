@@ -13,6 +13,7 @@ library(caret)
 First, let's import and partition our data set.
 
 ```{r import and partition, message = FALSE}
+set.seed(100)
 college_full <- read_csv("./Homework 2/College.csv") %>% 
   janitor::clean_names()
 # creating data partitioning index
@@ -26,7 +27,9 @@ college_tst <- college_full[-part_index, ] %>% # test data
   select(-college) # removing college name because unique identifier
 ```
 
-(a) And now we'll look at some exploratory analysis using the training data set.
+## Part a
+
+And now we'll look at some exploratory analysis using the training data set.
 
 ```{r eda outcome and predictors, fig.height = 8}
 # making a model matrix for caret
@@ -57,3 +60,191 @@ corrplot::corrplot(cor(college_x),
 ```
 
 It's clear from this plot that the number of applications, number of accepted students, and number of enrolled students have a high correlation with each other along with the number of full time undergraduate students, `f_undergrad`. There is also an understandably strong relationship between `top10perc` and `top25perc`. Another strong correlation is between percent of faculty with PhD's and percent of faculty with terminal degrees. This is likely because terminal degrees are often PhD's.
+
+## Part b
+
+Next, I'll fit smoothing spline models using `terminal` as the only predictor of `outstate` with varying degrees of freedom.
+```{r smoothing spline optimal fit}
+college_ss <- smooth.spline(x = college_trn$terminal,
+                            y = college_trn$outstate)
+# creating grid of values over range of terminal
+terminal_grid <- seq(from = min(college_full$terminal),
+                     to = max(college_full$terminal),
+                     by = 1)
+# predictions based on terminal grid
+pred_ss_opt <- predict(college_ss,
+                       x = terminal_grid)
+
+pred_ss_df <- data.frame(pred = pred_ss_opt$y,
+                         terminal = terminal_grid)
+
+ggplot(aes(x = terminal, y = outstate), data = college_trn) +
+  geom_point(color = rgb(.1, .1, .8, .25)) +
+  geom_line(aes(x = terminal, y = pred), 
+            color = rgb(.8, .1, .1, 1),
+            size = 0.75,
+            data = pred_ss_df) +
+  theme_bw() +
+  labs(title = "GCV Smoothing Spline of Terminal vs Outstate")
+```
+
+The plot above shows the smoothing spline model obtained when using the degree of freedom obtained from generalized cross-validation (GCV), which is equal to `r round(college_ss$df, digits = 3)`. Now let's look at plots for a few other degrees of freedom.
+
+```{r smoothing spline varying df}
+# function to create the smooth spline predictions
+smoothie <- function(freedom){
+  ss_fit <- smooth.spline(x = college_trn$terminal,
+                          y = college_trn$outstate,
+                          df = freedom)
+  pred_ss <- predict(ss_fit,
+                     x = terminal_grid)
+  pred_ss_df_freedom <- data.frame(pred = pred_ss,
+                           terminal = terminal_grid,
+                           degree = freedom)
+  return(pred_ss_df_freedom)
+}
+# creating a list to store for loop results
+spline_list <- list()
+# iterates over desired degrees of freedom
+for (i in 2:20){
+  output <- smoothie(i)
+  spline_list[[i]] <- output
+}
+# converting list to data frame for ggplot
+spline_df <- plyr::ldply(spline_list, data.frame) %>% 
+  group_by(degree)
+
+
+ggplot(aes(x = terminal, y = outstate), data = college_trn) +
+  geom_point(color = rgb(.1, .1, .8, .25)) +
+  geom_line(aes(x = terminal, y = pred.y, group = degree, color = degree),
+            size = 0.75,
+            data = spline_df) +
+  theme_bw() +
+  labs(title = "Smoothing Spline of Terminal vs Outstate: Varying Degrees of Freedom")
+```
+
+The plot of the GCV-optimized degree of freedom seems to fit the data reasonably well. It has some flexibility and follows the pattern of the data, but it does not seem to overfit or contort in odd ways. In the second plot of the varying degrees of freedom, we see the smoothing spline curves become more flexible as degree of freedom increases. The darker lines are either linear or have slight flexibility, however the lighter blue curves gain increased flexibility and show higher variance across the data. The model with the highest degrees of freedom, 20, seems to swing rather dramatically at different points in the data.
+
+## Part c
+
+Next, let's look at a generalized additive model (GAM) using all predictors.
+
+```{r gam fitting, warning = FALSE, message = FALSE}
+set.seed(100)
+# here we will use caret
+ctrl1 <- trainControl(method = "cv", number = 10)
+
+college_gam <- train(x = college_x,
+                     y = college_y,
+                     method = "gam",
+                     tuneGrid = data.frame(method = "GCV.Cp", select = c(TRUE, FALSE)),
+                     trControl = ctrl1)
+college_gam$bestTune
+college_gam$finalModel
+summary(college_gam)
+
+par(mar = c(1, 1, 1, 1))
+par(mfrow = c(4, 4))
+plot(college_gam$finalModel, residuals = TRUE, all.terms = TRUE, shade = TRUE, shade.col = 4)
+```
+
+In our final model, each predictor was considered for nonlinearity as shown by the `s(predictor)` output from `college_gam$finalModel`. In `caret`, any predictor with more than 10 unique data points is considered for nonlinearity. However, if a predictor has fewer than 10 unique values, it is not considered and some flexibility is lost. Here, this is thankfully not a concern.
+
+When looking at the model summary, we see an output of "parametric coefficients" and "smooth terms". In this model, only the intercept is included in the parametric coefficients section, which indicates linear terms. This makes sense because all of our predictors were considered for non-linearity. Looking at the "edf" or estimated degrees of freedom for our smooth terms, we see several instances of edf = 1.00. This indicates a linear relationship. So although nonlinear terms were considered for `top25perc`, `personal`, `p_undergrad`, and `enroll`, ultimately these terms show a linear relationship with the outcome in this model. We can see that the other predictors all have degrees of freedom greater than 1, indicating nonlinear terms. Now let's look at the test error.
+
+```{r gam test error}
+gam_predict <- predict(college_gam,
+                       newdata = college_tst)
+gam_error <- postResample(pred = gam_predict,
+                          obs = college_tst$outstate)
+```
+
+We find a test RMSE of `r round(gam_error[1], digits = 2)` using this GAM model on the test data set.
+
+## Part d
+
+Let's next look at a multivariate adaptive regression spline (MARS) model using all of the predictors.
+
+```{r mars fitting, message = FALSE, warning = FALSE}
+set.seed(100)
+mars_grid <- expand.grid(degree = 1:3,
+                         nprune = 2:25)
+college_mars <- train(x = college_x,
+                      y = college_y,
+                      method = "earth",
+                      tuneGrid = mars_grid,
+                      trControl = ctrl1)
+ggplot(college_mars)
+college_mars$bestTune
+coef(college_mars$finalModel) %>% knitr::kable()
+```
+
+Reviewing the output above, we can see that the lowest RMSE in the plot is achieved where the product degree is equal to 1 and the number of terms is equal to 15. We see this verified by the `bestTune` object from our fitted model. Looking at the coefficients, we see the predictors found to be predictive of `outstate`. Note the numerical values in the coefficient names. These indicate the location of knots for those predictors. We can look at two predictors specifically, `f_undergrad` and `accept` below.
+
+```{r mars pdp, warning = FALSE}
+p1 <- pdp::partial(college_mars, 
+                   pred.var = c("f_undergrad"),
+                   grid.resolution = 10) %>% autoplot()
+p2 <- pdp::partial(college_mars,
+                   pred.var = c("accept"),
+                   grid.resolution = 10) %>% autoplot()
+p3 <- pdp::partial(college_mars,
+                   pred.var = c("f_undergrad", "accept"),
+                   grid.resolution = 10) %>% 
+      pdp::plotPartial(levelplot = FALSE,
+                       zlab = "yhat",
+                       drape = TRUE,
+                       screen = list(z = 20, x = -60))
+pdp::grid.arrange(p1, p2, p3, ncol = 2)
+```
+
+In this plot, we can see the knots for the two predictors individually and in a hinged plane including both variables. Now, let's look at the test error.
+
+```{r mars test error}
+mars_predict <- predict(college_mars,
+                        newdata = college_tst)
+mars_error <- postResample(pred = mars_predict,
+                           obs = college_tst$outstate)
+```
+
+Using the MARS model, we find a test RMSE of `r round(mars_error[1], digits = 2)`.
+
+## Part e
+
+We fit a MARS model on the `college` data, but is this better than a linear model for predicting `outstate`? Let's take a look by first fitting a linear model to compare against using LASSO.
+
+```{r lasso fit}
+set.seed(100)
+
+college_lasso <- train(x = college_x,
+                       y = college_y,
+                       method = "glmnet",
+                       tuneGrid = expand.grid(alpha = 1,
+                                              lambda = exp(seq(5, -1, length = 100))),
+                       trControl = ctrl1,
+                       preProcess = c("center", "scale"))
+plot(college_lasso, xTrans = log)
+college_lasso$bestTune
+coef(college_lasso$finalModel, college_lasso$finalModel$lambdaOpt)
+```
+
+Looking at the output above, we see that the LASSO model removes the following predictors:
+
+* `apps`;
+* `top25perc`;
+* `f_undergrad`.
+
+Now, let's compare the cross-validation error of the LASSO model and the MARS model to see which one gives better predictions.
+
+```{r cv error mars vs lasso}
+set.seed(100)
+resamp <- resamples(list(mars = college_mars,
+                         lasso = college_lasso))
+summary(resamp)
+bwplot(resamples(list(mars = college_mars,
+                         lasso = college_lasso)),
+       metric = "RMSE")
+```
+
+Based on the results above, we prefer the MARS model because it has lower mean cross-validation RMSE, and thus it yields better predictions on average. So, we would report a test error of `r round(mars_error[1], digits = 2)`.
